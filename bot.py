@@ -110,10 +110,13 @@ def handle_photo(message):
     state = user_states.get(chat_id)
     
     if state == 'awaiting_new_item':
+        # Запоминаем, как было отправлено фото (документом или обычным фото)
+        is_doc = False
         if message.photo:
             file_id = message.photo[-1].file_id
         elif message.document:
             file_id = message.document.file_id
+            is_doc = True
         else:
             return
             
@@ -135,7 +138,8 @@ def handle_photo(message):
                 return
 
             magazin = load_db()
-            magazin[nazvanie] = {"price": cena, "photo": file_id}
+            # Сохраняем цену, ID картинки и флаг (файл или фото)
+            magazin[nazvanie] = {"price": cena, "photo": file_id, "is_doc": is_doc}
             save_db(magazin)
             
             user_states[chat_id] = None
@@ -204,22 +208,26 @@ def handle_text(message):
     magazin = load_db()
     found = False
     
-    # УЛУЧШЕННЫЙ ПОИСК (ловим товар, даже если он в середине предложения)
     for tovar, data in magazin.items():
         if tovar.lower() in text_lower or text_lower in tovar.lower():
             found = True
             cena = data["price"] if isinstance(data, dict) else data
             photo_id = data.get("photo", "") if isinstance(data, dict) else ""
+            is_doc = data.get("is_doc", False) if isinstance(data, dict) else False
             
             if photo_id:
                 try:
-                    bot.send_photo(chat_id, photo=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
-                except Exception:
-                    # Если фото устарело или удалилось из телеги, шлем текст
-                    bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони\n(Фото временно недоступно)", parse_mode='HTML')
+                    # Если это был документ - отправляем как документ, иначе как фото
+                    if is_doc:
+                        bot.send_document(chat_id, document=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
+                    else:
+                        bot.send_photo(chat_id, photo=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
+                except Exception as e:
+                    print(f"Ошибка отправки фото: {e}")
+                    bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
             else:
                 bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
-            break # Нашли товар — дальше не ищем
+            break 
             
     if not found:
         prompt = f"{SYSTEM_PROMPT}\n\nКлиент спрашивает: {text}"
