@@ -2,17 +2,27 @@ import telebot
 from telebot import types, formatting
 from google import genai
 import time
-import json 
 import os
 from flask import Flask
 from threading import Thread
+from pymongo import MongoClient # Библиотека для базы данных
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+MONGO_URI = os.environ.get("MONGO_URI", "") # Ссылка на базу данных
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# --- ПОДКЛЮЧЕНИЕ К MONGODB ---
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client["oisha_shop_db"]
+    collection = db["tovary"]
+    print("Успешное подключение к базе данных MongoDB!")
+except Exception as e:
+    print(f"ОШИБКА ПОДКЛЮЧЕНИЯ К БАЗЕ: {e}")
 
 # --- МИНИ-САЙТ ДЛЯ RENDER ---
 app = Flask('')
@@ -49,16 +59,26 @@ def set_commands():
     bot.set_my_commands(commands)
 set_commands()
 
-def load_db():
-    try:
-        with open('magazin.json', 'r', encoding='utf-8') as file:
-            return json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ---
+def get_all_items():
+    items = {}
+    for item in collection.find():
+        items[item["_id"]] = {
+            "price": item["price"], 
+            "photo": item.get("photo", ""), 
+            "is_doc": item.get("is_doc", False)
+        }
+    return items
 
-def save_db(data):
-    with open('magazin.json', 'w', encoding='utf-8') as file:
-        json.dump(data, file, ensure_ascii=False, indent=4)
+def add_item_to_db(nazvanie, cena, photo_id="", is_doc=False):
+    collection.update_one(
+        {"_id": nazvanie},
+        {"$set": {"price": cena, "photo": photo_id, "is_doc": is_doc}},
+        upsert=True
+    )
+
+def delete_item_from_db(nazvanie):
+    collection.delete_one({"_id": nazvanie})
 
 # --- КОМАНДЫ ---
 
@@ -70,14 +90,14 @@ def start_message(message):
 @bot.message_handler(commands=['catalog'])
 def catalog_message(message):
     user_states[message.chat.id] = None
-    magazin = load_db()
+    magazin = get_all_items()
     if not magazin:
         bot.reply_to(message, "Каталог пока пуст.")
         return
     
     text = "📦 <b>Наш каталог:</b>\n\n"
     for tovar, data in magazin.items():
-        cena = data["price"] if isinstance(data, dict) else data
+        cena = data["price"]
         safe_tovar = formatting.escape_html(tovar)
         text += f"🔹 {safe_tovar} — {cena} сомони\n"
     bot.reply_to(message, text, parse_mode='HTML')
@@ -110,7 +130,6 @@ def handle_photo(message):
     state = user_states.get(chat_id)
     
     if state == 'awaiting_new_item':
-        # Запоминаем, как было отправлено фото (документом или обычным фото)
         is_doc = False
         if message.photo:
             file_id = message.photo[-1].file_id
@@ -137,10 +156,7 @@ def handle_photo(message):
                 bot.send_message(chat_id, "Ошибка: Слишком дорого! Максимум 10 000 сомони.")
                 return
 
-            magazin = load_db()
-            # Сохраняем цену, ID картинки и флаг (файл или фото)
-            magazin[nazvanie] = {"price": cena, "photo": file_id, "is_doc": is_doc}
-            save_db(magazin)
+            add_item_to_db(nazvanie, cena, file_id, is_doc)
             
             user_states[chat_id] = None
             safe_name = formatting.escape_html(nazvanie)
@@ -179,7 +195,7 @@ def handle_text(message):
 
     if state == 'awaiting_delete_item':
         user_states[chat_id] = None
-        magazin = load_db()
+        magazin = get_all_items()
         to_delete = None
         for tovar in magazin.keys():
             if text_lower in tovar.lower() or tovar.lower() in text_lower:
@@ -187,8 +203,7 @@ def handle_text(message):
                 break
                 
         if to_delete:
-            del magazin[to_delete]
-            save_db(magazin)
+            delete_item_from_db(to_delete)
             safe_name = formatting.escape_html(to_delete)
             bot.send_message(chat_id, f"✅ Товар '<b>{safe_name}</b>' удален из базы!", parse_mode='HTML')
         else:
@@ -205,25 +220,23 @@ def handle_text(message):
         return 
     
     bot.send_chat_action(chat_id, 'typing')
-    magazin = load_db()
+    magazin = get_all_items()
     found = False
     
     for tovar, data in magazin.items():
         if tovar.lower() in text_lower or text_lower in tovar.lower():
             found = True
-            cena = data["price"] if isinstance(data, dict) else data
-            photo_id = data.get("photo", "") if isinstance(data, dict) else ""
-            is_doc = data.get("is_doc", False) if isinstance(data, dict) else False
+            cena = data["price"]
+            photo_id = data.get("photo", "")
+            is_doc = data.get("is_doc", False)
             
             if photo_id:
                 try:
-                    # Если это был документ - отправляем как документ, иначе как фото
                     if is_doc:
                         bot.send_document(chat_id, document=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
                     else:
                         bot.send_photo(chat_id, photo=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
                 except Exception as e:
-                    print(f"Ошибка отправки фото: {e}")
                     bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
             else:
                 bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
@@ -240,7 +253,7 @@ def handle_text(message):
 # --- ЗАПУСК ---
 if __name__ == "__main__":
     keep_alive()
-    print("Бот с защитой фото и поиском запущен!")
+    print("Бот подключен к базе данных и запущен!")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30)
