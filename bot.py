@@ -14,7 +14,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 bot = telebot.TeleBot(BOT_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# --- МИНИ-САЙТ ДЛЯ RENDER ---
+# --- МИНИ-САЙТ ДЛЯ RENDER (Чтобы сервер не засыпал) ---
 app = Flask('')
 @app.route('/')
 def home():
@@ -104,17 +104,21 @@ def delete_start(message):
     user_states[message.chat.id] = 'awaiting_delete_password'
     bot.send_message(message.chat.id, "🔒 <b>Удаление товара</b>\nВведите пароль для подтверждения:", parse_mode='HTML')
 
-# --- ОБРАБОТЧИК ФОТО (ДЛЯ АДМИНКИ) ---
-@bot.message_handler(content_types=['photo'])
+# --- ОБРАБОТЧИК ФОТО И ФАЙЛОВ (АДМИНКА) ---
+@bot.message_handler(content_types=['photo', 'document'])
 def handle_photo(message):
     chat_id = message.chat.id
     state = user_states.get(chat_id)
     
     if state == 'awaiting_new_item':
-        # Берем фото с самым высоким качеством
-        file_id = message.photo[-1].file_id
-        
-        # Читаем подпись к фото (название и цена)
+        # Ловим и обычное фото, и файл-картинку
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.document:
+            file_id = message.document.file_id
+        else:
+            return
+            
         caption = message.caption
         if not caption:
             bot.send_message(chat_id, "Ошибка: Вы отправили фото без подписи. Напишите название и цену в описании к фото.")
@@ -141,7 +145,7 @@ def handle_photo(message):
             safe_name = formatting.escape_html(nazvanie)
             bot.send_message(chat_id, f"✅ УСПЕХ! Товар '<b>{safe_name}</b>' с фото добавлен за {cena} сомони.", parse_mode='HTML')
         except ValueError:
-            bot.send_message(chat_id, "Ошибка: Цена должна быть числом.")
+            bot.send_message(chat_id, "Ошибка: Цена должна быть числом (последнее слово в подписи).")
     else:
         bot.send_message(chat_id, "Чтобы добавить фото, зайдите в /admin.")
 
@@ -153,7 +157,7 @@ def handle_text(message):
     text_lower = text.lower()
     state = user_states.get(chat_id)
 
-    # Пароли
+    # 1. Пароль для админки
     if state == 'awaiting_admin_password':
         bot.delete_message(chat_id, message.message_id) 
         if text == "oisha2026":
@@ -164,6 +168,7 @@ def handle_text(message):
             bot.send_message(chat_id, "❌ ДОСТУП ЗАПРЕЩЕН!")
         return
 
+    # 2. Пароль для удаления
     if state == 'awaiting_delete_password':
         bot.delete_message(chat_id, message.message_id)
         if text == "oisha2026":
@@ -174,6 +179,7 @@ def handle_text(message):
             bot.send_message(chat_id, "❌ ДОСТУП ЗАПРЕЩЕН!")
         return
 
+    # 3. Удаление товара
     if state == 'awaiting_delete_item':
         user_states[chat_id] = None
         magazin = load_db()
@@ -192,12 +198,18 @@ def handle_text(message):
             bot.send_message(chat_id, f"Товар не найден.")
         return
 
-    # Если это не админка и не пароль — ищем товар
+    # 4. Добавление товара текстом (если пользователь не прикрепил фото, а просто написал)
+    if state == 'awaiting_new_item':
+        bot.send_message(chat_id, "Пожалуйста, отправьте <b>фотографию</b> товара, а в подписи укажите название и цену.", parse_mode='HTML')
+        return
+
+    # 5. Заказ
     if "заказ" in text_lower or "тавр" in text_lower or "фармоиш" in text_lower or "харид" in text_lower:
         answer = 'Зайдите на наш <a href="https://instagram.com/oisha_shop_1989">Instagram</a> и напишите в Direct. 👗✨'
         bot.reply_to(message, answer, parse_mode='HTML')
         return 
     
+    # 6. Поиск товара
     bot.send_chat_action(chat_id, 'typing')
     magazin = load_db()
     found = False
@@ -208,14 +220,13 @@ def handle_text(message):
             cena = data["price"] if isinstance(data, dict) else data
             photo_id = data.get("photo", "") if isinstance(data, dict) else ""
             
-            # Если есть фото - отправляем фото с подписью
             if photo_id:
                 bot.send_photo(chat_id, photo=photo_id, caption=f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
             else:
-                # Если фото нет - отправляем просто текст
                 bot.reply_to(message, f"👗 <b>{formatting.escape_html(tovar)}</b>\n💰 Цена: {cena} сомони", parse_mode='HTML')
             
     if not found:
+        # Если товар не найден, идем к ИИ
         prompt = f"{SYSTEM_PROMPT}\n\nКлиент спрашивает: {text}"
         try:
             response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
@@ -226,7 +237,7 @@ def handle_text(message):
 # --- ЗАПУСК ---
 if __name__ == "__main__":
     keep_alive()
-    print("Бот с поддержкой фото запущен!")
+    print("Бот Oisha Shop с фото запущен!")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30)
